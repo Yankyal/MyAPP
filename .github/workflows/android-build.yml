@@ -1,0 +1,84 @@
+name: Build APK from zip
+
+on:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v4
+
+      - name: Set up JDK 11
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '11'
+
+      - name: Install Android SDK commandline-tools and components
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y wget unzip
+          ANDROID_SDK_ROOT="${{ runner.temp }}/android-sdk"
+          mkdir -p "$ANDROID_SDK_ROOT/cmdline-tools"
+          wget -q https://dl.google.com/android/repository/commandlinetools-linux-9477386_latest.zip -O cmdline.zip
+          unzip -q cmdline.zip -d "$ANDROID_SDK_ROOT/cmdline-tools"
+          mv "$ANDROID_SDK_ROOT/cmdline-tools/cmdline-tools" "$ANDROID_SDK_ROOT/cmdline-tools/latest" || true
+          yes | "$ANDROID_SDK_ROOT/cmdline-tools/latest/bin/sdkmanager" --sdk_root="$ANDROID_SDK_ROOT" "platform-tools" "platforms;android-33" "build-tools;33.0.2"
+          echo "ANDROID_SDK_ROOT=$ANDROID_SDK_ROOT" >> $GITHUB_ENV
+        shell: bash
+
+      - name: Unzip project and build debug APK
+        env:
+          ANDROID_SDK_ROOT: ${{ env.ANDROID_SDK_ROOT }}
+        run: |
+          set -euo pipefail
+          ZIP='iOSChatReaderWebViewApp_with_CI (2).zip'
+          if [ ! -f "$ZIP" ]; then
+            echo "Zip file $ZIP not found in repo root. Listing files:"
+            ls -la
+            exit 1
+          fi
+          rm -rf extracted
+          mkdir extracted
+          unzip -q "$ZIP" -d extracted
+          # find first directory inside extracted that contains settings.gradle or settings.gradle.kts
+          PROJECT_DIR=""
+          while IFS= read -r -d '' d; do
+            if [ -f "$d/settings.gradle" ] || [ -f "$d/settings.gradle.kts" ]; then
+              PROJECT_DIR="$d"
+              break
+            fi
+          done < <(find extracted -maxdepth 2 -type d -print0)
+
+          if [ -z "$PROJECT_DIR" ]; then
+            # fallback: use the first subdir
+            PROJECT_DIR=$(find extracted -mindepth 1 -maxdepth 1 -type d | head -n1)
+          fi
+          if [ -z "$PROJECT_DIR" ]; then
+            echo "Could not find project directory inside the zip"
+            ls -la extracted
+            exit 1
+          fi
+          echo "Found project dir: $PROJECT_DIR"
+          cd "$PROJECT_DIR" || exit 1
+          if [ -f "./gradlew" ]; then
+            chmod +x ./gradlew || true
+            ./gradlew assembleDebug --no-daemon
+          else
+            echo "No gradlew found, trying system gradle (may fail)"
+            gradle assembleDebug --no-daemon
+          fi
+          echo "Build finished. APK outputs:"
+          find . -type f -path "*/build/outputs/apk/*/*.apk" -print || true
+        shell: bash
+
+      - name: Upload debug APK artifact
+        uses: actions/upload-artifact@v3
+        with:
+          name: app-debug-apks
+          path: extracted/**/build/outputs/apk/**/*.apk
